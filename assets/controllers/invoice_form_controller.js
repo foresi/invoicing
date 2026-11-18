@@ -1,0 +1,611 @@
+/*
+ * SPDX-License-Identifier: AGPL-3.0-only
+ */
+import { Controller } from '@hotwired/stimulus';
+
+const RECOUNT_DELAY = 250;
+const MAX_SYMBOL_DIGITS = 10;
+const CONTACT_CHANNEL = 'foresi-contact-created';
+
+/**
+ * The live part of the invoice form, which works without it through the server's
+ * re-render actions. Amounts are never calculated here: every change asks the
+ * server, which uses the calculator of the save. Rows are added, removed and
+ * reordered here, with the names renumbered, so the server reads them in the order
+ * on screen. Enter in a field never issues a document; in the last cell of a row it
+ * adds a line. The page is a plain document without Turbo, so the browser's own
+ * beforeunload prompt guards a changed form. A recurring template's form uses it
+ * too: it has no number and no dates, so those parts stay idle there.
+ */
+export default class extends Controller {
+    static targets = [
+        'line', 'lines', 'lineCount', 'lineTemplate', 'totals', 'summaries', 'net', 'vat', 'rounding', 'roundingRow', 'payable',
+        'stale', 'addLine', 'lineLimit', 'dueDateSet', 'originalSeries', 'originalNumber', 'numberPeek', 'series', 'variableSymbol', 'issueDate', 'taxPointDate', 'dueDate',
+        'lineSources', 'errors', 'paymentMethod', 'bankRow', 'language', 'customerBox', 'summary', 'contactLink', 'notice', 'noticeText', 'noScript',
+    ];
+
+    static values = {
+        recountUrl: String, numberUrl: String, contactUrl: String, customersUrl: String, firm: String, kind: String, editing: Boolean, payer: Boolean,
+        issuerCountry: String, currency: String, dueDays: Number, titleTemplate: String, noticeTemplate: String,
+        registrationLabel: String, vatLabel: String, unsaved: Boolean,
+        maxLines: Number, newLineVat: String, dueDateSet: Boolean,
+    };
+
+    connect() {
+        // A form the server sent back still holds what nobody saved.
+        this.dirty = this.unsavedValue;
+        this.leaving = false;
+        this.noScriptTargets.forEach((element) => { element.hidden = true; });
+        this.taxPointFollows = this.hasTaxPointDateTarget && this.taxPointDateTarget.value === this.issueDateTarget.value;
+        this.dueDateFollows = !this.dueDateSetValue;
+        this.symbolFollows = this.hasVariableSymbolTarget && this.variableSymbolTarget.value === this.symbolOf(this.numberPeekTarget.value);
+        this.showSupplyCodes();
+        this.contacts = new BroadcastChannel(CONTACT_CHANNEL);
+        this.contacts.onmessage = (event) => this.contactCreated(event.data);
+        if (this.hasErrorsTarget) {
+            // After the form-errors controller has placed the first invalid field.
+            requestAnimationFrame(() => requestAnimationFrame(() => this.clearOfErrors(document.activeElement)));
+        }
+    }
+
+    disconnect() {
+        clearTimeout(this.timer);
+        this.request?.abort();
+        this.contacts.close();
+    }
+
+    // Changes
+
+    changed() {
+        this.dirty = true;
+        clearTimeout(this.timer);
+        this.timer = setTimeout(() => this.recount(), RECOUNT_DELAY);
+    }
+
+    async recount() {
+        this.request?.abort();
+        this.request = new AbortController();
+        try {
+            const response = await fetch(this.recountUrlValue, {
+                method: 'POST',
+                body: new FormData(this.element),
+                headers: { Accept: 'application/json' },
+                signal: this.request.signal,
+            });
+            // A row that cannot be counted yet keeps the last figures, marked as old; the save names the mistake.
+            this.staleTarget.hidden = response.ok;
+            if (response.ok) {
+                this.show(await response.json());
+            }
+        } catch (error) {
+            if (error.name !== 'AbortError') {
+                this.staleTarget.hidden = false;
+            }
+        }
+    }
+
+    show(figures) {
+        this.lineTargets.forEach((row, index) => {
+            row.querySelector('[data-line-total]').textContent = figures.lines[index]?.total ?? '';
+            row.querySelector('[data-line-discount]').textContent = figures.lines[index]?.discount ?? '';
+        });
+        if (this.hasNetTarget) {
+            this.netTarget.textContent = figures.net;
+            this.vatTarget.textContent = figures.vat ?? '';
+        }
+        this.roundingTarget.textContent = figures.rounding ?? '';
+        this.roundingRowTarget.classList.toggle('hidden', figures.rounding === null);
+        this.payableTarget.textContent = figures.payable;
+        this.summariesTarget.classList.toggle('hidden', figures.summaries.length === 0);
+        this.summariesTarget.replaceChildren(...figures.summaries.flatMap((summary) => this.summaryRows(summary)));
+    }
+
+    // A rate shows its base and its VAT on rows of their own, as the server renders them.
+    summaryRows(summary) {
+        if (summary.vat === '') {
+            return [this.totalRow(summary.label, summary.base)];
+        }
+        const { baseLabel, vatLabel } = this.totalsTarget.dataset;
+        return [
+            this.totalRow(baseLabel.replace('__RATE__', summary.label), summary.base),
+            this.totalRow(vatLabel.replace('__RATE__', summary.label), summary.vat),
+        ];
+    }
+
+    totalRow(text, figure) {
+        const row = document.createElement('div');
+        row.className = this.totalsTarget.dataset.rowClass;
+        const label = document.createElement('span');
+        label.textContent = text;
+        const amount = document.createElement('span');
+        amount.className = this.totalsTarget.dataset.amountClass;
+        amount.textContent = figure;
+        row.append(label, amount);
+        return row;
+    }
+
+    // Dates
+
+    issueDateChanged() {
+        const issued = this.issueDateTarget.value;
+        if (issued === '') {
+            return;
+        }
+        if (this.taxPointFollows) {
+            this.taxPointDateTarget.value = issued;
+        }
+        if (this.dueDateFollows) {
+            this.dueDateTarget.value = this.daysAfter(issued, this.dueDaysValue);
+        }
+        // A stored document keeps its number on a new date, unless it is moving to another series.
+        if (!this.editingValue || this.seriesMoved()) {
+            this.refreshNumber();
+        }
+    }
+
+    taxPointTyped() {
+        this.taxPointFollows = false;
+    }
+
+    dueDateTyped() {
+        this.dueDateFollows = false;
+        this.dueDateSetTarget.value = '1';
+    }
+
+    daysAfter(date, days) {
+        const [year, month, day] = date.split('-').map(Number);
+        return new Date(Date.UTC(year, month - 1, day + days)).toISOString().slice(0, 10);
+    }
+
+    // Number and variable symbol
+
+    seriesChanged() {
+        if (this.editingValue && !this.seriesMoved()) {
+            this.showNumber(this.originalNumberTarget.value);
+            return;
+        }
+        this.refreshNumber();
+    }
+
+    seriesMoved() {
+        return this.hasSeriesTarget && this.seriesTarget.value !== this.originalSeriesTarget.value;
+    }
+
+    async refreshNumber() {
+        if (!this.hasSeriesTarget) {
+            return;
+        }
+        const url = new URL(this.numberUrlValue, window.location.origin);
+        url.searchParams.set('date', this.issueDateTarget.value);
+        url.searchParams.set('series', this.seriesTarget.value);
+        url.searchParams.set('firm', this.firmValue);
+        url.searchParams.set('kind', this.kindValue);
+        const response = await fetch(url, { headers: { Accept: 'application/json' } });
+        if (response.ok) {
+            this.showNumber((await response.json()).number);
+        }
+    }
+
+    // The pencil sits in the page header, outside this element.
+    get numberField() {
+        return document.getElementById('number');
+    }
+
+    outsideInput(event) {
+        if (event.target === this.numberField) {
+            this.numberTyped();
+            this.changed();
+        }
+    }
+
+    // A number typed by hand stays; only the preview moves under it.
+    showNumber(number) {
+        const field = this.numberField;
+        const typed = field !== null && field.value !== this.numberPeekTarget.value && field.value !== '';
+        this.numberPeekTarget.value = number;
+        if (typed) {
+            return;
+        }
+        if (field !== null) {
+            field.value = number;
+        }
+        this.showTitle(number);
+        this.followSymbol(number);
+    }
+
+    numberTyped() {
+        const number = this.numberField.value.trim() || this.numberPeekTarget.value;
+        this.showTitle(number);
+        this.followSymbol(number);
+    }
+
+    showTitle(number) {
+        const title = this.titleTemplateValue.replace('__NUMBER__', number);
+        const heading = document.querySelector('main h1');
+        heading.textContent = title;
+        heading.title = title;
+    }
+
+    symbolTyped() {
+        this.symbolFollows = false;
+    }
+
+    followSymbol(number) {
+        if (this.symbolFollows) {
+            this.variableSymbolTarget.value = this.symbolOf(number);
+        }
+    }
+
+    // The rule of VariableSymbol on the server; the server derives it again on save.
+    symbolOf(number) {
+        const digits = number.replace(/\D/g, '');
+        return digits.length > MAX_SYMBOL_DIGITS ? '' : digits;
+    }
+
+    // Customer and payment
+
+    firmChanged() {
+        this.element.requestSubmit(this.element.querySelector('button[name="_action"][value="refresh"]'));
+    }
+
+    customerPicked(event) {
+        const customer = event.detail;
+        this.field('customer[name]').value = customer.name;
+        this.field('customer[registrationNumber]').value = customer.registrationNumber ?? '';
+        this.field('customer[vatId]').value = customer.vatId ?? '';
+        this.field('customer[street]').value = customer.billing.street;
+        this.field('customer[city]').value = customer.billing.city;
+        this.field('customer[postalCode]').value = customer.billing.postalCode;
+        this.field('customer[countryCode]').value = customer.billing.countryCode;
+        this.field('customer[email]').value = customer.email ?? '';
+        this.field('customer[phone]').value = '';
+        this.field('customer[web]').value = '';
+        this.field('customer[registerEntry]').value = '';
+        this.customerBoxTarget.classList.remove('hidden');
+        this.summaryTarget.textContent = this.summaryOf(customer);
+        this.contactLinkTarget.href = this.contactUrlValue.replace(/[0-9a-f-]{36}/, customer.id);
+
+        this.dueDaysValue = customer.dueDays;
+        if (this.hasDueDateTarget && this.dueDateFollows && this.issueDateTarget.value !== '') {
+            this.dueDateTarget.value = this.daysAfter(this.issueDateTarget.value, customer.dueDays);
+        }
+        this.paymentMethodTarget.value = customer.paymentMethod;
+        this.paymentChanged();
+        this.languageTarget.value = customer.language;
+        if (this.payerValue) {
+            this.newLineVatValue = customer.reverseCharge ? 'reverse_charge' : 'base';
+            this.vatCells().forEach((cell) => {
+                if (customer.reverseCharge) {
+                    cell.value = 'reverse_charge';
+                } else if (cell.value === 'reverse_charge') {
+                    cell.value = 'base';
+                }
+            });
+        }
+        this.showSupplyCodes();
+        const foreign = customer.currency !== this.currencyValue;
+        this.noticeTarget.hidden = !foreign;
+        this.noticeTextTarget.textContent = foreign ? this.noticeTemplateValue.replace('__CURRENCY__', customer.currency) : '';
+        this.changed();
+    }
+
+    // The plus opens the short contact form in a dialog over this form; without JavaScript, or with
+    // a modified click, the full one in a new tab, which keeps this form. The first contact saved
+    // there comes back here; a contact saved in some other tab does not.
+    awaitContact() {
+        this.awaitingContact = true;
+    }
+
+    // The dialog lives outside this form: only its result touches the invoice, as a picked customer.
+    contactFromDialog(event) {
+        this.awaitingContact = true;
+        this.contactCreated(event.detail.id);
+    }
+
+    async contactCreated(id) {
+        if (!this.awaitingContact) {
+            return;
+        }
+        this.awaitingContact = false;
+        const url = new URL(this.customersUrlValue, window.location.origin);
+        url.searchParams.set('id', id);
+        const response = await fetch(url, { headers: { Accept: 'application/json' } });
+        const customer = response.ok ? (await response.json()).results[0] : undefined;
+        if (customer !== undefined) {
+            this.field('customerId').value = customer.id;
+            this.field('customerQuery').value = customer.label;
+            this.element.querySelector('[data-customer-candidates]')?.remove();
+            this.customerPicked({ detail: customer });
+        }
+    }
+
+    customerCleared() {
+        if (this.payerValue) {
+            this.newLineVatValue = 'base';
+        }
+        this.customerBoxTarget.classList.add('hidden');
+        this.noticeTarget.hidden = true;
+    }
+
+    summaryOf(customer) {
+        const parts = [];
+        if (customer.registrationNumber) {
+            parts.push(`${this.registrationLabelValue} ${customer.registrationNumber}`);
+        }
+        if (this.payerValue && customer.vatId) {
+            parts.push(`${this.vatLabelValue} ${customer.vatId}`);
+        }
+        const seat = [customer.billing.street, [customer.billing.postalCode, customer.billing.city].filter(Boolean).join(' ')].filter(Boolean).join(', ');
+        return [...parts, seat].join(' · ');
+    }
+
+    paymentChanged() {
+        this.bankRowTarget.classList.toggle('hidden', this.paymentMethodTarget.value !== 'bank_transfer');
+    }
+
+    // The number and IBAN rows of the chosen account (_bank_account.html.twig).
+    bankAccountChanged(event) {
+        this.bankRowTarget.querySelectorAll('[data-bank-details]').forEach((details) => {
+            details.classList.toggle('hidden', details.dataset.bankDetails !== event.target.value);
+        });
+    }
+
+    field(name) {
+        return this.element.querySelector(`[name="${name}"]`);
+    }
+
+    // Rows
+
+    vatChanged() {
+        this.showSupplyCodes();
+    }
+
+    vatCells() {
+        return Array.from(this.element.querySelectorAll('select[data-cell="vat"]'));
+    }
+
+    // The code belongs to a customer of the issuer's country; a hidden code must not stay behind.
+    showSupplyCodes() {
+        const vatId = this.field('customer[vatId]').value.trim().toUpperCase();
+        const domestic = vatId === '' || vatId.startsWith(this.issuerCountryValue);
+        this.lineTargets.forEach((row) => {
+            const box = row.querySelector('[data-supply-code]');
+            if (box !== null) {
+                box.hidden = !(domestic && row.querySelector('select[data-cell="vat"]').value === 'reverse_charge');
+                if (box.hidden) {
+                    box.querySelector('select').value = '';
+                }
+            }
+        });
+    }
+
+    newRow() {
+        const row = this.lineTemplateTarget.content.firstElementChild.cloneNode(true);
+        const vat = row.querySelector('select[data-cell="vat"]');
+        if (vat !== null) {
+            vat.value = this.newLineVatValue;
+        }
+        this.linesTarget.append(row);
+        return row;
+    }
+
+    addLine() {
+        if (this.lineTargets.length >= this.maxLinesValue) {
+            return;
+        }
+        const row = this.newRow();
+        this.renumber();
+        row.querySelector('input[data-cell="text"]').focus();
+        this.changed();
+    }
+
+    removeLine(event) {
+        const row = event.currentTarget.closest('tbody');
+        const index = this.lineTargets.indexOf(row);
+        if (this.lineTargets.length === 1) {
+            this.newRow();
+        }
+        row.remove();
+        this.renumber();
+        // The row that took its place, or the new last one.
+        const next = this.lineTargets[Math.min(index, this.lineTargets.length - 1)];
+        next.querySelector('input[data-cell="text"]').focus();
+        this.changed();
+    }
+
+    moveUp(event) {
+        this.move(event.currentTarget, -1);
+    }
+
+    moveDown(event) {
+        this.move(event.currentTarget, 1);
+    }
+
+    // A discount is a sub-row of its line: the tag opens it, its own button empties and closes it.
+    addDiscount(event) {
+        const group = event.currentTarget.closest('tbody');
+        const box = group.querySelector('[data-discount]');
+        box.hidden = false;
+        event.currentTarget.setAttribute('aria-expanded', 'true');
+        box.querySelector('input').select();
+    }
+
+    removeDiscount(event) {
+        const group = event.currentTarget.closest('tbody');
+        const box = group.querySelector('[data-discount]');
+        const add = group.querySelector('[id$="-discount-add"]');
+        box.querySelector('input').value = '';
+        box.hidden = true;
+        add.setAttribute('aria-expanded', 'false');
+        add.focus();
+        this.changed();
+    }
+
+    move(button, step) {
+        const row = button.closest('tbody');
+        const trigger = row.querySelector('[data-dropdown-target=button]');
+        row.querySelector('[data-dropdown-target=menu]').hidden = true;
+        trigger.setAttribute('aria-expanded', 'false');
+        const sibling = step < 0 ? row.previousElementSibling : row.nextElementSibling;
+        const neighbour = sibling?.matches('tbody') ? sibling : null;
+        trigger.focus();
+        if (neighbour === null) {
+            return;
+        }
+        if (step < 0) {
+            neighbour.before(row);
+        } else {
+            neighbour.after(row);
+        }
+        this.renumber();
+        trigger.focus();
+        this.changed();
+    }
+
+    // Dragging: a row can be dragged only from its grip, and only while the button is down.
+
+    armDrag(event) {
+        event.currentTarget.closest('tbody').draggable = true;
+    }
+
+    disarmDrag() {
+        if (this.dragged === undefined || this.dragged === null) {
+            this.lineTargets.forEach((row) => { row.draggable = false; });
+        }
+    }
+
+    dragStart(event) {
+        this.dragged = event.target.closest('tbody');
+    }
+
+    dragOver(event) {
+        if (!this.dragged) {
+            return;
+        }
+        event.preventDefault();
+        const target = event.target.closest('tbody');
+        if (target !== null && target !== this.dragged) {
+            const below = event.clientY > target.getBoundingClientRect().top + target.offsetHeight / 2;
+            target[below ? 'after' : 'before'](this.dragged);
+        }
+    }
+
+    dragDrop() {
+        // The row is in place already; dragend tidies up.
+    }
+
+    dragEnd() {
+        if (!this.dragged) {
+            return;
+        }
+        this.dragged.draggable = false;
+        this.dragged = null;
+        this.renumber();
+        this.changed();
+    }
+
+    // Names, ids and buttons follow the order on screen.
+    renumber() {
+        this.lineTargets.forEach((row, index) => {
+            row.querySelectorAll('[name], [id], [for], [aria-describedby], [aria-controls], [aria-labelledby], button[value]').forEach((element) => {
+                for (const attribute of ['name', 'id', 'for', 'aria-describedby', 'aria-controls', 'aria-labelledby']) {
+                    if (element.hasAttribute(attribute)) {
+                        element.setAttribute(attribute, element.getAttribute(attribute).replace(/lines\[[^\]]+\]/, `lines[${index}]`).replace(/lines-[^-]+-/, `lines-${index}-`));
+                    }
+                }
+                if (element.matches('button[value]')) {
+                    element.value = element.value.replace(/:.*$/, `:${index}`);
+                }
+            });
+        });
+        this.showSupplyCodes();
+        if (this.hasLineCountTarget) {
+            this.lineCountTarget.textContent = String(this.lineTargets.length);
+        }
+        const full = this.lineTargets.length >= this.maxLinesValue;
+        this.addLineTarget.disabled = full;
+        this.lineLimitTarget.hidden = !full;
+    }
+
+    // Errors
+
+    closeErrors() {
+        this.errorsTarget.remove();
+        (this.element.querySelector('[aria-invalid="true"]') ?? this.element.querySelector('[data-save]')).focus();
+    }
+
+    goToField(event) {
+        const field = document.getElementById(event.currentTarget.hash.slice(1));
+        if (field === null) {
+            return;
+        }
+        // A copy field of the customer shows only with the box ticked.
+        if (field.id.startsWith('customer-')) {
+            document.getElementById('customerEdit').checked = true;
+        }
+        for (let box = field.closest('details'); box !== null; box = box.parentElement.closest('details')) {
+            box.open = true;
+        }
+        field.focus({ preventScroll: true });
+        field.scrollIntoView({ block: 'center', inline: 'nearest' });
+        this.clearOfErrors(field);
+    }
+
+    // The list floats over the form, so a field it names must end up above it.
+    clearOfErrors(field) {
+        if (!this.hasErrorsTarget || !(field instanceof HTMLElement)) {
+            return;
+        }
+        const overlap = field.getBoundingClientRect().bottom + 8 - this.errorsTarget.getBoundingClientRect().top;
+        if (overlap > 0) {
+            window.scrollBy({ top: overlap, behavior: 'instant' });
+        }
+    }
+
+    // Enter
+
+    enter(event) {
+        const field = event.target;
+        if (field.form !== this.element || !field.matches('input, select') || event.defaultPrevented) {
+            return;
+        }
+        event.preventDefault();
+        const row = field.closest('tbody');
+        if (row !== null && row === this.lineTargets.at(-1) && field === this.lastCell(row)) {
+            this.addLine();
+        }
+    }
+
+    // The discount shows on some rows only, so the last cell depends on the row.
+    lastCell(row) {
+        return Array.from(row.querySelectorAll('[data-cell]')).filter((cell) => cell.getClientRects().length > 0).at(-1);
+    }
+
+    // Leaving
+
+    // Set once: a second click goes nowhere, and a submit lifts the guard for good.
+    submitted(event) {
+        if (this.leaving) {
+            event.preventDefault();
+            return;
+        }
+        this.leaving = true;
+        clearTimeout(this.timer);
+        // The line each row came from, in the order on screen, as one field: a field on each row takes 100 lines past max_input_vars.
+        this.lineSourcesTarget.value = JSON.stringify(this.lineTargets.map((row) => row.dataset.source ?? ''));
+    }
+
+    beforeUnload(event) {
+        if (this.dirty && !this.leaving) {
+            event.preventDefault();
+            event.returnValue = '';
+        }
+    }
+
+    // Back to a page the browser kept: the form is live again.
+    shown(event) {
+        if (event.persisted) {
+            this.leaving = false;
+        }
+    }
+}
