@@ -6,12 +6,10 @@
 
 declare(strict_types=1);
 
-namespace Foresi\Invoicing\Domain;
+namespace Foresi\Invoicing\Contract;
 
 use Doctrine\ORM\Mapping as ORM;
 use Foresi\Party\Domain\Address;
-use Foresi\Party\Domain\LegalEntity;
-use Foresi\Party\Domain\Party;
 
 /**
  * A frozen copy of a customer or an issuer on a document. It holds plain values:
@@ -55,28 +53,5 @@ final readonly class DocumentParty
         #[ORM\Column(type: 'string', length: self::MAX_IMAGE_NAME, nullable: true)]
         public ?string $stamp,
     ) {
-    }
-
-    public static function ofCustomer(Party $party, Address $billing, ?string $email): self
-    {
-        return new self($party->displayName(), $party->registrationNumber()?->toString(), $party->vatId()?->toString(), $billing, '', $email, $party->phone(), $party->website(), null, null);
-    }
-
-    public static function ofIssuer(LegalEntity $firm, FirmInvoicing $settings): self
-    {
-        $email = $settings->contactEmail();
-
-        return new self(
-            $firm->name(),
-            $firm->registrationNumber()->toString(),
-            $firm->vatId()?->toString(),
-            $firm->address(),
-            $firm->registerEntry(),
-            '' === $email ? null : $email,
-            $settings->contactPhone(),
-            $settings->contactWeb(),
-            $firm->logo(),
-            $firm->stamp(),
-        );
     }
 }

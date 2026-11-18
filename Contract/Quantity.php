@@ -6,7 +6,7 @@
 
 declare(strict_types=1);
 
-namespace Foresi\Invoicing\Domain;
+namespace Foresi\Invoicing\Contract;
 
 /**
  * A quantity with four decimals, stored as whole ten-thousandths. The bound keeps

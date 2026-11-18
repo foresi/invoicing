@@ -6,7 +6,7 @@
 
 declare(strict_types=1);
 
-namespace Foresi\Invoicing\Domain;
+namespace Foresi\Invoicing\Contract;
 
 /**
  * The kind of a sales document. A document takes it from its series, so a series

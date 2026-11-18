@@ -6,11 +6,8 @@
 
 declare(strict_types=1);
 
-namespace Foresi\Invoicing\Application;
+namespace Foresi\Invoicing\Contract;
 
-use Foresi\Invoicing\Domain\Percent;
-use Foresi\Invoicing\Domain\TaxTreatment;
-use Foresi\Invoicing\Domain\VatRateKind;
 use Foresi\Shared\Domain\Currency;
 
 /**

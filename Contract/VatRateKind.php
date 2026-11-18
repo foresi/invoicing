@@ -6,7 +6,7 @@
 
 declare(strict_types=1);
 
-namespace Foresi\Invoicing\Domain;
+namespace Foresi\Invoicing\Contract;
 
 /**
  * The kind of a VAT rate; the country says what it is on a date, and a kind

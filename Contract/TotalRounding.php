@@ -6,7 +6,7 @@
 
 declare(strict_types=1);
 
-namespace Foresi\Invoicing\Domain;
+namespace Foresi\Invoicing\Contract;
 
 /**
  * How the payable total is rounded.

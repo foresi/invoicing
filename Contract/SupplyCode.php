@@ -6,7 +6,7 @@
 
 declare(strict_types=1);
 
-namespace Foresi\Invoicing\Application;
+namespace Foresi\Invoicing\Contract;
 
 /**
  * A code a country asks for on a document whose supply is taxed by the customer, with the key of its label.

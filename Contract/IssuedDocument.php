@@ -6,14 +6,8 @@
 
 declare(strict_types=1);
 
-namespace Foresi\Invoicing\Application;
+namespace Foresi\Invoicing\Contract;
 
-use Foresi\Invoicing\Domain\DocumentKind;
-use Foresi\Invoicing\Domain\DocumentParty;
-use Foresi\Invoicing\Domain\InvoiceLine;
-use Foresi\Invoicing\Domain\RateSummary;
-use Foresi\Invoicing\Domain\TotalRounding;
-use Foresi\Invoicing\Domain\VatRegime;
 use Foresi\Party\Domain\DocumentLanguage;
 use Foresi\Party\Domain\PaymentMethod;
 use Foresi\Shared\Domain\Currency;
@@ -27,7 +21,7 @@ use Foresi\Shared\Domain\Money;
 final readonly class IssuedDocument
 {
     /**
-     * @param list<InvoiceLine>                                                         $lines
+     * @param list<DocumentLine>                                                        $lines
      * @param list<RateSummary>                                                         $summaries
      * @param string|null                                                               $advanceNumber   the advance invoice a tax document on payment taxes a payment of
      * @param array<string, array{number: string, variableSymbol: string, taxed: bool}> $deposits        what deduction lines deduct, by id:
