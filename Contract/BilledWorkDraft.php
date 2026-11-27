@@ -6,7 +6,7 @@
 
 declare(strict_types=1);
 
-namespace Foresi\Invoicing\Application;
+namespace Foresi\Invoicing\Contract;
 
 use Foresi\Shared\Domain\Currency;
 
@@ -17,6 +17,9 @@ use Foresi\Shared\Domain\Currency;
  */
 final readonly class BilledWorkDraft
 {
+    /** The most lines an invoice holds, so the module offers no more. */
+    public const int MAX_LINES = 100;
+
     /**
      * @param list<BilledLine> $lines
      */

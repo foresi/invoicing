@@ -6,16 +6,16 @@
 
 declare(strict_types=1);
 
-namespace Foresi\Invoicing\Integration\Sales;
+namespace Foresi\Invoicing\Integration\Deals;
 
 use Doctrine\ORM\EntityManagerInterface;
+use Foresi\Deals\Contract\BillingDocument;
+use Foresi\Deals\Contract\BillingDocumentSource;
+use Foresi\Deals\Contract\BillingDocumentType;
 use Foresi\Invoicing\Contract\DocumentKind;
 use Foresi\Invoicing\Domain\Invoice;
 use Foresi\Invoicing\Domain\RecurringInvoice;
 use Foresi\Invoicing\Domain\RecurringState;
-use Foresi\Sales\Contract\BillingDocument;
-use Foresi\Sales\Contract\BillingDocumentSource;
-use Foresi\Sales\Contract\BillingDocumentType;
 use Symfony\Component\Routing\Generator\UrlGeneratorInterface;
 
 /**

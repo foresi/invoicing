@@ -6,9 +6,8 @@
 
 declare(strict_types=1);
 
-namespace Foresi\Invoicing\Application;
+namespace Foresi\Invoicing\Contract;
 
-use Foresi\Invoicing\Contract\Quantity;
 use Foresi\Shared\Domain\Money;
 
 /**
